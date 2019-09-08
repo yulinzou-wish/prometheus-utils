@@ -1,4 +1,5 @@
-""" This module wrappered prometheus four kinds of metric types: Counter, 
+""" prometheus pusgateway utils
+This module wrappered prometheus four kinds of metric types: Counter, 
 Gauge, Histogram and Summary. And delegate the push metrics to pushgateway 
 function. Base on prometheus_client version 0.7.1
 """
@@ -69,13 +70,10 @@ class MetricWrapper(object):
 
         # job is mandatory for push gateway api and could not be ''
         # doc is mandatory for metric init
-        if label_dict == None:
-           label_dict = {'job': 'job', 'doc': ''}
-        self.doc = label_dict.pop('doc') if label_dict.has_key('doc') else ''
-        self.job = label_dict['job'] if label_dict.has_key('job') else 'job'
-
-        # job value '' will cause '400 Bad Request' on push_gateway api call
-        if self.job == '': self.job = 'job'
+        if label_dict==None or label_dict=={}:
+            label_dict = {'job': '_', 'doc': ''}
+        self.doc = label_dict.pop('doc') if 'doc' in label_dict.keys() else ''
+        self.job = label_dict['job'] if 'job' in label_dict.keys() else '_'
 
         self.label_dict = dict(label_dict, **{'_signature': self.name})
         self.label_names = list(label_dict.keys())
@@ -115,3 +113,10 @@ class MetricWrapper(object):
     def observe(self, amount):
         """ Wrapper observe method for Histogram and Summary """
         pass
+
+
+# pylint: disable=C0103
+Counter = functools.partial(MetricWrapper, 'Counter')
+Gauge = functools.partial(MetricWrapper, 'Gauge')
+Histogram = functools.partial(MetricWrapper, 'Histogram')
+Summary = functools.partial(MetricWrapper, 'Summary')

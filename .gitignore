@@ -1,0 +1,48 @@
+dist/
+*egg-info/
+
+# Don't track files with the following extentions.
+*~
+*.o
+*.lo
+*.pyc
+*.e4p
+*.cbp
+*.layout
+*.log
+._*
+
+tags
+tags.lock
+tags.temp
+.tags
+*.pyo
+*.swp
+*.swo
+
+# for people who uses eclipse.
+.settings/*
+.project
+.pydevproject
+.metadata
+
+.commit
+
+# for arc
+.arc/
+
+# for Mac users
+.DS_Store
+
+# Xcode user settings
+xcuserdata/
+
+# In case you want to configure pylint (or link to .arcpylint_rcfile)
+.pylintrc
+
+# nodejs modules
+node_modules/
+
+# Ignore virtualenv directory
+.env
+HEAD_SHA1
