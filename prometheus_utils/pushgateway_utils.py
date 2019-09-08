@@ -1,6 +1,6 @@
 """ prometheus pusgateway utils
-This module wrappered prometheus four kinds of metric types: Counter, 
-Gauge, Histogram and Summary. And delegate the push metrics to pushgateway 
+This module wrappered prometheus four kinds of metric types: Counter,
+Gauge, Histogram and Summary. And delegate the push metrics to pushgateway
 function. Base on prometheus_client version 0.7.1
 """
 
@@ -58,9 +58,13 @@ class PushWrapper(object):
             PromClient.instance().push_gateway(job=cls.job, registry=cls.registry, grouping_key=cls.label_dict)
         return wrapper_f
 
-
 class MetricWrapper(object):
+    """ Wrapper prometheus Counter, Gauge, Summary and Histogram """
     def __init__(self, metric_type, metric_name, label_dict={}):
+        assert metric_type in ('Counter', 'Gauge', 'Summary', 'Histogram')
+        assert isinstance(metric_name, str)
+        assert isinstance(label_dict, dict)
+
         # Add timer suffix for histogram and summary
         if metric_type in ['Histogram', 'Summary'] and not metric_name.endswith('timer'):
             metric_name += '_timer'
@@ -69,11 +73,12 @@ class MetricWrapper(object):
         self.name = metric_name
 
         # job is mandatory for push gateway api and could not be ''
-        # doc is mandatory for metric init
-        if label_dict==None or label_dict=={}:
-            label_dict = {'job': '_', 'doc': ''}
-        self.doc = label_dict.pop('doc') if 'doc' in label_dict.keys() else ''
-        self.job = label_dict['job'] if 'job' in label_dict.keys() else '_'
+        # doc is mandatory for prometheus metric init
+        if 'job' not in label_dict.keys() or label_dict['job'] == '':
+            label_dict.update({'job': 'job'})
+
+        self.doc = label_dict['doc'] if 'doc' in label_dict.keys() else ''
+        self.job = label_dict['job'] if 'job' in label_dict.keys() else 'job'
 
         self.label_dict = dict(label_dict, **{'_signature': self.name})
         self.label_names = list(label_dict.keys())
@@ -84,7 +89,7 @@ class MetricWrapper(object):
             self.name,
             self.doc,
             self.label_names,
-            registry = self.registry
+            registry=self.registry
         )
 
         if isinstance(_metric_instance, prometheus_client.metrics.Histogram):
@@ -115,7 +120,6 @@ class MetricWrapper(object):
         pass
 
 
-# pylint: disable=C0103
 Counter = functools.partial(MetricWrapper, 'Counter')
 Gauge = functools.partial(MetricWrapper, 'Gauge')
 Histogram = functools.partial(MetricWrapper, 'Histogram')
