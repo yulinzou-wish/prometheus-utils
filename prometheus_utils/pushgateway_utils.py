@@ -3,21 +3,20 @@ This module wrappered prometheus four kinds of metric types: Counter,
 Gauge, Histogram and Summary. And delegate the push metrics to pushgateway
 function. Base on prometheus_client version 0.7.1
 """
-
-import os
-import sys
+# pylint: disable=C0301, C0111
 import json
+import redis
 import hashlib
 import logging
 import functools
+import dill as pickle
+
 from tornado.options import options
 from . import prometheus_client
 from .prometheus_client import CollectorRegistry
 
-DEFAULT_PUSHGW_HOST = 'pushgateway{}bjs.i.wish.com'
-DEFAULT_PUSHGW_PORT = "9091"
-
-DEFAULT_REGISTRY = CollectorRegistry()
+DEFAULT_PUSHGW = 'pushgateway{}bjs.i.wish.com'
+DEFAULT_REDIS = 'pushgw-cache{}bjs.i.wish.com'
 DEFAULT_BUCKETS = [0.01, 0.025, 0.05, 0.075, 0.1, 0.125, 0.15, 0.175, 0.2, 0.25, 0.5, 0.75, 1, 1.5, 2, 2.5, 3, 5, float("inf")]
 
 class PromClient(object):
@@ -36,9 +35,9 @@ class PromClient(object):
 
     def __init__(self, env=None):
         _env = options.env if 'env' in options else env
-        self.pushgw_addr = DEFAULT_PUSHGW_HOST.format('.' if 'prod' in str(_env) else '.stage.')
+        self.pushgw_addr = DEFAULT_PUSHGW.format('.' if 'prod' in str(_env) else '.stage.')
 
-    def push_gateway(self, job, registry=DEFAULT_REGISTRY, grouping_key=None, method='push_to_gateway'):
+    def push_gateway(self, job, registry=CollectorRegistry(), grouping_key=None, method='push_to_gateway'):
         """ Wrappered prometheus_client  push to gateway """
         try:
             getattr(prometheus_client, method)(self.pushgw_addr, job=job, registry=registry, grouping_key=grouping_key)
@@ -52,18 +51,24 @@ class PushWrapper(object):
 
     def __call__(self, f, *args, **kwargs):
         @functools.wraps(f)
-        def wrapper_f (cls, *args, **kwargs):
+        def wrapper_f(cls, *args, **kwargs):
             if cls.type not in self.metric_types:
                 logging.error("'%s' just available for %s", f.__name__, self.metric_types)
                 return
             f(self, *args, **kwargs)
             getattr(cls.metric_instance.labels(*cls.label_values), f.__name__)(*args, **kwargs)
+
+            # Since Pushgateway not support aggergation, need to cache
+            # the metric registry in client side.
+            cls.redis_con.set(cls.reg_key, pickle.dumps({'r':cls.registry, 'm':cls.metric_instance}))
+
             PromClient.instance().push_gateway(job=cls.job, registry=cls.registry, grouping_key=cls.label_dict)
         return wrapper_f
 
+
 class MetricWrapper(object):
     """ Wrapper prometheus Counter, Gauge, Summary and Histogram """
-    registry_set = {}
+    redis_con = redis.Redis(host=DEFAULT_REDIS, port=6379, db=0)
 
     def __init__(self, metric_type, metric_name, label_dict={}):
         assert metric_type in ('Counter', 'Gauge', 'Summary', 'Histogram')
@@ -86,22 +91,22 @@ class MetricWrapper(object):
 
         # Prometheus Pushgatewy officially not support metrics aggregation
         # and it just distinguish the metrics by grouping_key.
-        # so set metric_name{label_dict} as grp key to avoid overwrite.
+        # set metric_name{label_dict} as grp key to avoid overwrite.
         self.label_dict = label_dict
         _signature = "{}{}".format(self.name, json.dumps(self.label_dict))
-        _reg_key = hashlib.sha1(_signature).hexdigest()
-        self.label_dict.update({'_gid': _reg_key})
+        self.reg_key = hashlib.sha1(_signature).hexdigest()
+        self.label_dict.update({'_gid': self.reg_key})
 
         self.label_names = list(label_dict.keys())
         self.label_values = tuple(label_dict.values())
 
-        _reg_dct = self.registry_set.get(_reg_key, {'r': None, 'm': None })
+        _reg_dct = {'r':None, 'm':None} if self.redis_con.get(self.reg_key) is None else pickle.loads(self.redis_con.get(self.reg_key))
 
-        if _reg_dct['r'] == None:
+        if _reg_dct['r'] is None:
             _reg_dct['r'] = CollectorRegistry()
         self.registry = _reg_dct['r']
 
-        if _reg_dct['m'] == None:
+        if _reg_dct['m'] is None:
             _reg_dct['m'] = getattr(prometheus_client, metric_type)(
                 self.name,
                 self.doc,
@@ -109,11 +114,6 @@ class MetricWrapper(object):
                 registry=self.registry
             )
         self.metric_instance = _reg_dct['m']
-
-        # Since Pushgateway not support aggergation, need to cache 
-        # the metric registry in client side.
-        # Todo: use redis replace the in-memory registry_set
-        self.registry_set[_reg_key] = _reg_dct
 
 
     @PushWrapper(metric_types=['Counter', 'Gauge'])
