@@ -5,6 +5,9 @@ function. Base on prometheus_client version 0.7.1
 """
 
 import os
+import sys
+import json
+import hashlib
 import logging
 import functools
 from tornado.options import options
@@ -60,6 +63,8 @@ class PushWrapper(object):
 
 class MetricWrapper(object):
     """ Wrapper prometheus Counter, Gauge, Summary and Histogram """
+    registry_set = {}
+
     def __init__(self, metric_type, metric_name, label_dict={}):
         assert metric_type in ('Counter', 'Gauge', 'Summary', 'Histogram')
         assert isinstance(metric_name, str)
@@ -72,31 +77,43 @@ class MetricWrapper(object):
         self.type = metric_type
         self.name = metric_name
 
-        # job is mandatory for push gateway api and could not be ''
+        # job is mandatory for push gateway api
         # doc is mandatory for prometheus metric init
-        if 'job' not in label_dict.keys() or label_dict['job'] == '':
-            label_dict.update({'job': 'job'})
+        self.doc = label_dict.pop('doc', 'doc')
+        self.job = label_dict.get('job', 'job')
 
-        self.doc = label_dict['doc'] if 'doc' in label_dict.keys() else ''
-        self.job = label_dict['job'] if 'job' in label_dict.keys() else 'job'
+        label_dict.update({self.job: self.job})
 
-        self.label_dict = dict(label_dict, **{'_signature': self.name})
+        # Prometheus Pushgatewy officially not support metrics aggregation
+        # and it just distinguish the metrics by grouping_key.
+        # so set metric_name{label_dict} as grp key to avoid overwrite.
+        self.label_dict = label_dict
+        _signature = "{}{}".format(self.name, json.dumps(self.label_dict))
+        _reg_key = hashlib.sha1(_signature).hexdigest()
+        self.label_dict.update({'_gid': _reg_key})
+
         self.label_names = list(label_dict.keys())
         self.label_values = tuple(label_dict.values())
 
-        self.registry = CollectorRegistry()
-        _metric_instance = getattr(prometheus_client, metric_type)(
-            self.name,
-            self.doc,
-            self.label_names,
-            registry=self.registry
-        )
+        _reg_dct = self.registry_set.get(_reg_key, {'r': None, 'm': None })
 
-        if isinstance(_metric_instance, prometheus_client.metrics.Histogram):
-             _metric_instance._kwargs['buckets'] = label_dict.pop('buckets') \
-                       if label_dict.has_key('buckets') else DEFAULT_BUCKETS
+        if _reg_dct['r'] == None:
+            _reg_dct['r'] = CollectorRegistry()
+        self.registry = _reg_dct['r']
 
-        self.metric_instance = _metric_instance
+        if _reg_dct['m'] == None:
+            _reg_dct['m'] = getattr(prometheus_client, metric_type)(
+                self.name,
+                self.doc,
+                self.label_names,
+                registry=self.registry
+            )
+        self.metric_instance = _reg_dct['m']
+
+        # Since Pushgateway not support aggergation, need to cache 
+        # the metric registry in client side.
+        # Todo: use redis replace the in-memory registry_set
+        self.registry_set[_reg_key] = _reg_dct
 
 
     @PushWrapper(metric_types=['Counter', 'Gauge'])
