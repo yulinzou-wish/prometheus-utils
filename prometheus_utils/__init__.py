@@ -45,11 +45,14 @@ class Mon(object):
         if dict_ext != None:
             label_dict.update(dict_ext)
 
+        # Set default 'job' value as class name
+        label_dict.update({'job': cls.__name__})
+
         return metric_type(metric_name, label_dict)
 
 
     @classmethod
-    @gen.coroutine
+#    @gen.coroutine
     def inc(cls, metric_name_ext='', label_dict_ext={}, incr_by=1):
         """ inc count value by using Gauge.inc(...) """
         _metric = cls._bld_metric(Gauge, metric_name_ext, label_dict_ext)

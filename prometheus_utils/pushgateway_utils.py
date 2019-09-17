@@ -3,20 +3,21 @@ This module wrappered prometheus four kinds of metric types: Counter,
 Gauge, Histogram and Summary. And delegate the push metrics to pushgateway
 function. Base on prometheus_client version 0.7.1
 """
-# pylint: disable=C0301, C0111
+
+import os
+import sys
 import json
-import redis
 import hashlib
 import logging
 import functools
-import dill as pickle
-
 from tornado.options import options
 from . import prometheus_client
 from .prometheus_client import CollectorRegistry
 
-DEFAULT_PUSHGW = 'pushgateway{}bjs.i.wish.com'
-DEFAULT_REDIS = 'pushgw-cache{}bjs.i.wish.com'
+DEFAULT_PUSHGW_HOST = 'pushgateway{}bjs.i.wish.com'
+DEFAULT_PUSHGW_PORT = "9091"
+
+DEFAULT_REGISTRY = CollectorRegistry()
 DEFAULT_BUCKETS = [0.01, 0.025, 0.05, 0.075, 0.1, 0.125, 0.15, 0.175, 0.2, 0.25, 0.5, 0.75, 1, 1.5, 2, 2.5, 3, 5, float("inf")]
 
 class PromClient(object):
@@ -35,9 +36,9 @@ class PromClient(object):
 
     def __init__(self, env=None):
         _env = options.env if 'env' in options else env
-        self.pushgw_addr = DEFAULT_PUSHGW.format('.' if 'prod' in str(_env) else '.stage.')
+        self.pushgw_addr = DEFAULT_PUSHGW_HOST.format('.' if 'prod' in str(_env) else '.stage.')
 
-    def push_gateway(self, job, registry=CollectorRegistry(), grouping_key=None, method='push_to_gateway'):
+    def push_gateway(self, job, registry=DEFAULT_REGISTRY, grouping_key=None, method='push_to_gateway'):
         """ Wrappered prometheus_client  push to gateway """
         try:
             getattr(prometheus_client, method)(self.pushgw_addr, job=job, registry=registry, grouping_key=grouping_key)
@@ -49,26 +50,25 @@ class PushWrapper(object):
     def __init__(self, metric_types=None):
         self.metric_types = metric_types
 
-    def __call__(self, f, *args, **kwargs):
-        @functools.wraps(f)
-        def wrapper_f(cls, *args, **kwargs):
+    def __call__(self, func, *args, **kwargs):
+        @functools.wraps(func)
+        def wrapper_f (cls, *args, **kwargs):
             if cls.type not in self.metric_types:
-                logging.error("'%s' just available for %s", f.__name__, self.metric_types)
+                logging.error("'%s' just available for %s", func.__name__, self.metric_types)
                 return
-            f(self, *args, **kwargs)
-            getattr(cls.metric_instance.labels(*cls.label_values), f.__name__)(*args, **kwargs)
+            func(self, *args, **kwargs)
+            getattr(cls.metric_instance.labels(*cls.label_values), func.__name__)(*args, **kwargs)
 
-            # Since Pushgateway not support aggergation, need to cache
-            # the metric registry in client side.
-            cls.redis_con.set(cls.reg_key, pickle.dumps({'r':cls.registry, 'm':cls.metric_instance}))
+            # Since Pushgateway not support aggergation,
+            # need to cache the metric registry
+            cls.registry_set[cls.job] = cls.registry
 
-            PromClient.instance().push_gateway(job=cls.job, registry=cls.registry, grouping_key=cls.label_dict)
+            PromClient.instance().push_gateway(job=cls.job, registry=cls.registry, grouping_key=None)
         return wrapper_f
-
 
 class MetricWrapper(object):
     """ Wrapper prometheus Counter, Gauge, Summary and Histogram """
-    redis_con = redis.Redis(host=DEFAULT_REDIS, port=6379, db=0)
+    registry_set = {}
 
     def __init__(self, metric_type, metric_name, label_dict={}):
         assert metric_type in ('Counter', 'Gauge', 'Summary', 'Histogram')
@@ -82,38 +82,35 @@ class MetricWrapper(object):
         self.type = metric_type
         self.name = metric_name
 
-        # job is mandatory for push gateway api
         # doc is mandatory for prometheus metric init
         self.doc = label_dict.pop('doc', 'doc')
-        self.job = label_dict.get('job', 'job')
 
-        label_dict.update({self.job: self.job})
-
-        # Prometheus Pushgatewy officially not support metrics aggregation
+        # Prometheus Pushgatewy not support metrics aggregation
         # and it just distinguish the metrics by grouping_key.
-        # set metric_name{label_dict} as grp key to avoid overwrite.
+        # so set metric_name{label_dict} as grp key to avoid overwrite.
         self.label_dict = label_dict
-        _signature = "{}{}".format(self.name, json.dumps(self.label_dict))
-        self.reg_key = hashlib.sha1(_signature).hexdigest()
-        self.label_dict.update({'_gid': self.reg_key})
+
+        # job is mandatory for push gateway api
+        #  - for gague/count, default set job as xMon class name
+        #  - for histogram/summary(timer), set job as metric name
+        _search_key = self.name
+        if self.type in ['Histogram', 'Summary']:
+            self.label_dict.update({'job': self.name})
+            _search_key = self.name+'_created'
+
+        self.job = label_dict.get('job')
 
         self.label_names = list(label_dict.keys())
         self.label_values = tuple(label_dict.values())
 
-        _reg_dct = {'r':None, 'm':None} if self.redis_con.get(self.reg_key) is None else pickle.loads(self.redis_con.get(self.reg_key))
-
-        if _reg_dct['r'] is None:
-            _reg_dct['r'] = CollectorRegistry()
-        self.registry = _reg_dct['r']
-
-        if _reg_dct['m'] is None:
-            _reg_dct['m'] = getattr(prometheus_client, metric_type)(
-                self.name,
-                self.doc,
-                self.label_names,
-                registry=self.registry
-            )
-        self.metric_instance = _reg_dct['m']
+        self.registry = self.registry_set.get(self.job, CollectorRegistry())
+        self.metric_instance = self.registry._names_to_collectors.get(_search_key) \
+                               or getattr(prometheus_client, metric_type)(
+                                      self.name,
+                                      self.doc,
+                                      self.label_names,
+                                      registry=self.registry
+                                  )
 
 
     @PushWrapper(metric_types=['Counter', 'Gauge'])
