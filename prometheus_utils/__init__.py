@@ -4,17 +4,25 @@ as metrics pushing
 """
 
 import inspect
-from functools import partial
+import threading
+import functools
 from tornado import gen
 from .pushgateway_utils import PromClient, Gauge, Histogram
 
 __all__ = ['PromClient', 'Mon']
 
+def thread_safe(f):
+    @functools.wraps(f)
+    def wrap_f(cls, *args, **kwargs):
+        with cls._lock:
+            f(cls, *args, **kwargs)
+    return wrap_f
 
 class Mon(object):
     """ Base class for prometheus monitoring"""
     metric_name_ext = ''
     label_dict_ext = {}
+    _lock = threading.Lock()
 
     @classmethod
     def _get_lst(cls):
@@ -52,7 +60,8 @@ class Mon(object):
 
 
     @classmethod
-#    @gen.coroutine
+    @gen.coroutine
+    @thread_safe
     def inc(cls, metric_name_ext='', label_dict_ext={}, incr_by=1):
         """ inc count value by using Gauge.inc(...) """
         _metric = cls._bld_metric(Gauge, metric_name_ext, label_dict_ext)
@@ -63,12 +72,14 @@ class Mon(object):
 
     @classmethod
     @gen.coroutine
+    @thread_safe
     def set(cls, metric_name_ext='', label_dict_ext={}, value=0):
         """ set count value by using Gauge.set(...) """
         cls._bld_metric(Gauge, metric_name_ext, label_dict_ext).set(value)
 
     @classmethod
     @gen.coroutine
+    @thread_safe
     def val(cls, metric_name_ext='', label_dict_ext={}, time=0.0):
         """ push time value by using Histogram.observe(...) """
         cls._bld_metric(Histogram, metric_name_ext, label_dict_ext).observe(time)

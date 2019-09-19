@@ -7,21 +7,33 @@ function. Base on prometheus_client version 0.7.1
 import os
 import sys
 import json
-import redis
+import time
 import hashlib
 import logging
+import threading
 import functools
 import dill as pickle
+
+from enum import Enum
+from redis import Redis, ConnectionPool
+from rq import Queue
 
 from tornado.options import options
 from . import prometheus_client
 from .prometheus_client import CollectorRegistry
 
-DEFAULT_PUSHGW = 'pushgateway{}bjs.i.wish.com'
+
+DEFAULT_PUSHGW = lambda x: 'pushgateway{}bjs.i.wish.com'.format('.' if 'prod' in x else '.stage.')
 DEFAULT_REDIS = 'pushgw-cache.bjs.i.wish.com'
 
 DEFAULT_REGISTRY = CollectorRegistry()
 DEFAULT_BUCKETS = [0.01, 0.025, 0.05, 0.075, 0.1, 0.125, 0.15, 0.175, 0.2, 0.25, 0.5, 0.75, 1, 1.5, 2, 2.5, 3, 5, float("inf")]
+
+REDIS_CONN = lambda x: Redis(connection_pool=ConnectionPool(host=DEFAULT_REDIS, port=6379, db=x))
+
+class RedisDB(Enum):
+    registry = 0
+    queue = 1
 
 class PromClient(object):
     """
@@ -39,7 +51,7 @@ class PromClient(object):
 
     def __init__(self, env=None):
         _env = options.env if 'env' in options else env
-        self.pushgw_addr = DEFAULT_PUSHGW.format('.' if 'prod' in str(_env) else '.stage.')
+        self.pushgw_addr = DEFAULT_PUSHGW(str(_env))
 
     def push_gateway(self, job, registry=DEFAULT_REGISTRY, grouping_key=None, method='push_to_gateway'):
         """ Wrappered prometheus_client  push to gateway """
@@ -59,19 +71,23 @@ class PushWrapper(object):
             if cls.type not in self.metric_types:
                 logging.error("'%s' just available for %s", f.__name__, self.metric_types)
                 return
+
             f(self, *args, **kwargs)
             getattr(cls.metric_instance.labels(*cls.label_values), f.__name__)(*args, **kwargs)
 
-            # Since Pushgateway not support aggergation, need to cache
-            # the metric registry in client side.
-            cls.redis_con.set(cls.job, pickle.dumps(cls.registry))
+            # Since Pushgateway not support aggergation,
+            # need to cache the metric registry.
+            cls.registry_con.set(cls.job, pickle.dumps(cls.registry))
 
-            PromClient.instance().push_gateway(job=cls.job, registry=cls.registry, grouping_key=None)
+            # enqueue the push to gateway action
+            job = cls.jq.enqueue(PromClient.instance().push_gateway, job=cls.job, registry=cls.registry, grouping_key=None)
         return wrapper_f
+
 
 class MetricWrapper(object):
     """ Wrapper prometheus Counter, Gauge, Summary and Histogram """
-    redis_con = redis.Redis(host=DEFAULT_REDIS, port=6379, db=0)
+    registry_con = REDIS_CONN(RedisDB.registry.value)
+    jq = Queue(connection=REDIS_CONN(RedisDB.queue.value))
 
     def __init__(self, metric_type, metric_name, label_dict={}):
         assert metric_type in ('Counter', 'Gauge', 'Summary', 'Histogram')
@@ -88,9 +104,6 @@ class MetricWrapper(object):
         # doc is mandatory for prometheus metric init
         self.doc = label_dict.pop('doc', 'doc')
 
-        # Prometheus Pushgatewy not support metrics aggregation
-        # and it just distinguish the metrics by grouping_key.
-        # so set metric_name{label_dict} as grp key to avoid overwrite.
         self.label_dict = label_dict
 
         # job is mandatory for push gateway api
@@ -106,8 +119,9 @@ class MetricWrapper(object):
         self.label_names = list(label_dict.keys())
         self.label_values = tuple(label_dict.values())
 
-        self.registry = CollectorRegistry() if self.redis_con.get(self.job)==None \
-                             else pickle.loads(self.redis_con.get(self.job))
+
+        self.registry = CollectorRegistry() if self.registry_con.get(self.job)==None \
+                             else pickle.loads(self.registry_con.get(self.job))
 
         self.metric_instance = self.registry._names_to_collectors.get(_search_key) \
                                or getattr(prometheus_client, metric_type)(
@@ -116,7 +130,6 @@ class MetricWrapper(object):
                                       self.label_names,
                                       registry=self.registry
                                   )
-
 
 
     @PushWrapper(metric_types=['Counter', 'Gauge'])
