@@ -13,52 +13,55 @@ import logging
 import threading
 import functools
 import dill as pickle
-
-from enum import Enum
 from redis import Redis, ConnectionPool
-from rq import Queue
-
+from tornado import gen
 from tornado.options import options
+from tornado.web import Application
 from . import prometheus_client
 from .prometheus_client import CollectorRegistry
 
-
-DEFAULT_PUSHGW = lambda x: 'pushgateway{}bjs.i.wish.com'.format('.' if 'prod' in x else '.stage.')
-DEFAULT_REDIS = 'pushgw-cache.bjs.i.wish.com'
+DOMAIN_SUFFIX = lambda env: '{}bjs.i.wish.com'.format('.' if 'prod' in env else '.stage.')
+DEFAULT_PUSHGW = lambda x: 'pushgateway{}'.format( DOMAIN_SUFFIX(x) )
+DEFAULT_REDIS = lambda x: Redis(
+                    connection_pool=ConnectionPool.from_url(
+                        'redis://pushgw-cache{}:6379/0'.format( DOMAIN_SUFFIX(x) )
+                    )
+                )
 
 DEFAULT_REGISTRY = CollectorRegistry()
 DEFAULT_BUCKETS = [0.01, 0.025, 0.05, 0.075, 0.1, 0.125, 0.15, 0.175, 0.2, 0.25, 0.5, 0.75, 1, 1.5, 2, 2.5, 3, 5, float("inf")]
-
-REDIS_CONN = lambda x: Redis(connection_pool=ConnectionPool(host=DEFAULT_REDIS, port=6379, db=x))
-
-class RedisDB(Enum):
-    registry = 0
-    queue = 1
 
 class PromClient(object):
     """
     Integrate prometheus metrics pushing to pushgateway
     """
     _instance = None
+    _pushgw_addr = None
+    _pushgw_cache = None
 
     @classmethod
     def instance(cls):
         return cls._instance
 
     @classmethod
+    def pushgw_addr(cls):
+        return cls._pushgw_addr
+
+    @classmethod
+    def pushgw_cache(cls):
+        return cls._pushgw_cache
+
+    @classmethod
     def init_instance(cls, env=None):
-        cls._instance = cls(env)
+        _env = options.env if 'env' in options else str(env)
+        cls._instance = cls()
+        cls._pushgw_cache = DEFAULT_REDIS(_env)
+        cls._pushgw_addr = DEFAULT_PUSHGW(_env)
 
-    def __init__(self, env=None):
-        _env = options.env if 'env' in options else env
-        self.pushgw_addr = DEFAULT_PUSHGW(str(_env))
-
-    def push_gateway(self, job, registry=DEFAULT_REGISTRY, grouping_key=None, method='push_to_gateway'):
+    @gen.coroutine
+    def push_gateway(self, job, registry=DEFAULT_REGISTRY, grp_key=None, method='push_to_gateway'):
         """ Wrappered prometheus_client  push to gateway """
-        try:
-            getattr(prometheus_client, method)(self.pushgw_addr, job=job, registry=registry, grouping_key=grouping_key)
-        except:
-            logging.exception("Exception occurred when calling %s", method)
+        getattr(prometheus_client, method)(self._pushgw_addr, job=job, registry=registry, grouping_key=grp_key)
 
 
 class PushWrapper(object):
@@ -74,25 +77,23 @@ class PushWrapper(object):
 
             f(self, *args, **kwargs)
             getattr(cls.metric_instance.labels(*cls.label_values), f.__name__)(*args, **kwargs)
+            logging.debug('{}({}) {} {}'.format(cls.name, cls.type, f.__name__, args[0]))
 
             # Since Pushgateway not support aggergation,
             # need to cache the metric registry.
-            cls.registry_con.set(cls.job, pickle.dumps(cls.registry))
+            PromClient.pushgw_cache().set(cls.job, pickle.dumps(cls.registry))
 
-            # enqueue the push to gateway action
-            job = cls.jq.enqueue(PromClient.instance().push_gateway, job=cls.job, registry=cls.registry, grouping_key=None)
+            PromClient.instance().push_gateway(job=cls.job, registry=cls.registry, grp_key=None)
         return wrapper_f
 
 
 class MetricWrapper(object):
     """ Wrapper prometheus Counter, Gauge, Summary and Histogram """
-    registry_con = REDIS_CONN(RedisDB.registry.value)
-    jq = Queue(connection=REDIS_CONN(RedisDB.queue.value))
 
     def __init__(self, metric_type, metric_name, label_dict={}):
-        assert metric_type in ('Counter', 'Gauge', 'Summary', 'Histogram')
-        assert isinstance(metric_name, str)
-        assert isinstance(label_dict, dict)
+        # assert metric_type in ('Counter', 'Gauge', 'Summary', 'Histogram')
+        # assert isinstance(metric_name, str)
+        # assert isinstance(label_dict, dict)
 
         # Add timer suffix for histogram and summary
         if metric_type in ['Histogram', 'Summary'] and not metric_name.endswith('timer'):
@@ -103,7 +104,6 @@ class MetricWrapper(object):
 
         # doc is mandatory for prometheus metric init
         self.doc = label_dict.pop('doc', 'doc')
-
         self.label_dict = label_dict
 
         # job is mandatory for push gateway api
@@ -111,17 +111,16 @@ class MetricWrapper(object):
         #  - for histogram/summary(timer), set job as metric_name
         _search_key = self.name
         if self.type in ['Histogram', 'Summary']:
-            self.label_dict.update({'job': self.name})
             _search_key = self.name+'_created'
 
-        self.job = label_dict.get('job')
+        self.job = '%s{%s}' % (self.name, ','.join(label_dict.keys()))
+        self.label_dict.update({'job': self.job})
 
         self.label_names = list(label_dict.keys())
         self.label_values = tuple(label_dict.values())
 
-
-        self.registry = CollectorRegistry() if self.registry_con.get(self.job)==None \
-                             else pickle.loads(self.registry_con.get(self.job))
+        self.registry = CollectorRegistry() if PromClient.pushgw_cache().get(self.job)==None \
+                             else pickle.loads(PromClient.pushgw_cache().get(self.job))
 
         self.metric_instance = self.registry._names_to_collectors.get(_search_key) \
                                or getattr(prometheus_client, metric_type)(

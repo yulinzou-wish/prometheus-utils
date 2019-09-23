@@ -32,9 +32,9 @@ class Mon(object):
 
     @classmethod
     def _bld_metric(cls, metric_type, name_ext, dict_ext):
-        assert metric_type in (Gauge, Histogram)
-        assert isinstance(name_ext, str)
-        assert isinstance(dict_ext, dict)
+        # assert metric_type in (Gauge, Histogram)
+        # assert isinstance(name_ext, str)
+        # assert isinstance(dict_ext, dict)
 
         # Avoid duplicate metric name extend with direct parents
         if cls.metric_name_ext in (x.metric_name_ext for x in cls.__bases__ if hasattr(x, 'metric_name_ext')):

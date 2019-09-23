@@ -27,6 +27,7 @@ tags.temp
 .metadata
 
 .commit
+.pip-reqs
 
 # for arc
 .arc/

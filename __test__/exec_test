@@ -1,0 +1,6 @@
+#!/usr/bin/env sh
+
+E=${1-stage}
+L=${2-debug}
+
+$(which python) ./server.py --env=$E --logging=$L 2>&1 | tee /tmp/test_log.$(date +%Y-%m-%d_%H.%M.%S)

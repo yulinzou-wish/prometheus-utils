@@ -8,7 +8,7 @@ README = open(os.path.join(os.path.dirname(__file__), 'README.md')).read()
 config = {
     'description': 'Prometheus Utils',
     'long_description': README,
-    'url': 'git://bjs-git.bjs.i.wish.com/prometheus-utils.git@wish_pypicloud',
+    'url': 'git@github.com:yulinzou-wish/prometheus-utils.git',
     'author': 'chn-infra',
     'author_email': 'chn-infra@wish.com',
     'license': 'MIT',

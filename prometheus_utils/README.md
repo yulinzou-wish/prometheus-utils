@@ -1,4 +1,4 @@
-# BJS Prometheus PushGateway utils
+# Prometheus PushGateway utils base on Prometheus Client v0.7.1 and PushGateway v0.7.0
 Provide the Promethtues metrics monitoring APIs to push metrics to Prometheus PushGateway.
 
 #### - Init Wrappered Prometheus Client instance
@@ -27,12 +27,7 @@ Gauge('gauge_metric', {'g1_lab1': 'g1_v1', 'g1_lab2': 'g1_v2', 'job': 'jg1'}).se
 
 #### Histogram
 ```
-# Default buckets
 Histogram('histogram_metric1', {'h1_lab1': 'h1_v1', 'h1_lab2': 'h1_v2', 'job': 'jh1'}).observe(1.2)
-
-# Custom buckets
-bkts = [0.01, 0.025, 0.05, 0.075, 0.1, 0.125, 0.15, 0.175, 0.2, 0.25, 0.5, 0.75, 1, 1.5, 2, 2.5, 3, 5]
-Histogram('histogram_metric2', {'h2_lab1': 'h2_v1', 'h2_lab2': 'h2_v2', 'job': 'jh2', 'buckets': bkts}).observe(2.3)
 ```
 
 #### Summary
