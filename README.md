@@ -1,5 +1,5 @@
 ### Prometheus utils
-Provide Promethtues metrics wrapper and pushgateway utils
+Provide Prometheus metrics wrapper and pushgateway utils
 Integrated with prometheus_client version 0.7.1
 
 #### Getting Started
